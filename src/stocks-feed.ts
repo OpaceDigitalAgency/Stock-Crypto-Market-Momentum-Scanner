@@ -93,5 +93,5 @@ export class StocksFeed {
 export async function fetchCandles(symbol: string) {
   const response = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}`);
   if (!response.ok) throw new Error(`Candle source responded ${response.status}`);
-  return await response.json() as { symbol: string; candles: { time: number; open: number; high: number; low: number; close: number; volume: number }[] };
+  return await response.json() as { symbol: string; candles: { time: number; open: number; high: number; low: number; close: number; volume: number }[]; precision?: "full" | "price-only" };
 }

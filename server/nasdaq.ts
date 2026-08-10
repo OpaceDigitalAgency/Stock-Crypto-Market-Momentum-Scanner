@@ -1,4 +1,4 @@
-import type { StockQuote, StocksPayload, SymbolNews } from "./yahoo";
+import type { CandlePayload, StockQuote, StocksPayload, SymbolNews } from "./yahoo";
 
 const NASDAQ_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -71,6 +71,37 @@ export async function fetchNasdaqStocks(): Promise<StocksPayload> {
   }
   quotes.sort((a, b) => b.changePercent - a.changePercent);
   return { quotes: quotes.slice(0, 150), fetchedAt: now, screens: ["nasdaq-screener"], source: "nasdaq" };
+}
+
+/**
+ * Nasdaq's intraday chart provides price points without OHLC or volume, so
+ * candles are synthesised (open = previous point) and marked "price-only".
+ */
+export async function fetchNasdaqCandles(symbol: string): Promise<CandlePayload> {
+  const clean = symbol.trim().toUpperCase();
+  if (!/^[A-Z0-9.-]{1,12}$/.test(clean)) throw new Error("Invalid symbol");
+  const response = await fetch(`https://api.nasdaq.com/api/quote/${encodeURIComponent(clean)}/chart?assetclass=stocks`, {
+    headers: NASDAQ_HEADERS,
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) throw new Error(`Nasdaq chart responded ${response.status}`);
+  const payload = await response.json() as { data?: { chart?: { x?: number; y?: number }[] } };
+  const points = (payload.data?.chart ?? []).filter((point): point is { x: number; y: number } =>
+    typeof point.x === "number" && typeof point.y === "number" && Number.isFinite(point.y) && point.y > 0);
+  const candles: CandlePayload["candles"] = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const open = points[index - 1].y;
+    const close = points[index].y;
+    candles.push({
+      time: points[index].x,
+      open,
+      close,
+      high: Math.max(open, close),
+      low: Math.min(open, close),
+      volume: 0
+    });
+  }
+  return { symbol: clean, candles, fetchedAt: Date.now(), precision: "price-only" };
 }
 
 interface NasdaqNewsRow {

@@ -124,7 +124,7 @@ class App {
   private catalystReports = new Map<string, CatalystReport>();
   private catalystsRequested = new Set<string>();
 
-  private pullbacks = new Map<string, { result: PullbackResult; at: number }>();
+  private pullbacks = new Map<string, { result: PullbackResult; at: number; precision: "full" | "price-only" }>();
   private pullbackPending = new Set<string>();
 
   private pendingDeleteId?: string;
@@ -336,9 +336,11 @@ class App {
     this.pullbackPending.add(candidate.symbol);
     try {
       let candles: Candle[] = [];
+      let precision: "full" | "price-only" = "full";
       if (candidate.assetClass === "stocks") {
         const payload = await fetchCandles(candidate.symbol);
         candles = payload.candles;
+        precision = payload.precision === "price-only" ? "price-only" : "full";
       } else {
         const response = await fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/klines?symbol=${encodeURIComponent(candidate.symbol)}&interval=1m&limit=120`);
         if (!response.ok) throw new Error("Binance klines unavailable");
@@ -346,9 +348,9 @@ class App {
           time: raw.closeTime, open: raw.open, high: raw.high, low: raw.low, close: raw.close, volume: raw.baseVolume
         }));
       }
-      this.pullbacks.set(candidate.symbol, { result: analysePullback(candles), at: Date.now() });
+      this.pullbacks.set(candidate.symbol, { result: analysePullback(candles), at: Date.now(), precision });
     } catch {
-      this.pullbacks.set(candidate.symbol, { result: { ready: false, reason: "source-unavailable" }, at: Date.now() });
+      this.pullbacks.set(candidate.symbol, { result: { ready: false, reason: "source-unavailable" }, at: Date.now(), precision: "full" });
     } finally {
       this.pullbackPending.delete(candidate.symbol);
       if (this.view === "plan" && this.selected?.symbol === candidate.symbol) this.render();
@@ -679,7 +681,8 @@ class App {
     const passes = ticks.filter((tick) => tick.state === "pass").length;
     const strong = passes >= 4;
     void this.ensurePullback(selected);
-    const pullback = this.pullbacks.get(selected.symbol)?.result;
+    const pullbackRecord = this.pullbacks.get(selected.symbol);
+    const pullback = pullbackRecord?.result;
     const suggestedStop = pullback?.ready && pullback.pullbackLow < selected.price ? pullback.pullbackLow : selected.price * 0.98;
     return `
       <div class="plan-head">
@@ -700,7 +703,7 @@ class App {
         </section>
         <section class="panel">
           <p class="step-label">Step 2 — ${this.simple ? "Is this a good moment?" : "Pullback check"}</p>
-          ${this.renderMoment(pullback)}
+          ${this.renderMoment(pullback, pullbackRecord?.precision ?? "full")}
         </section>
         <section class="panel" style="grid-column:1/-1">
           <p class="step-label">Step 3 — ${this.simple ? "Plan your practice trade" : "Position size"}</p>
@@ -717,7 +720,7 @@ class App {
       </div>`;
   }
 
-  private renderMoment(pullback: PullbackResult | undefined) {
+  private renderMoment(pullback: PullbackResult | undefined, precision: "full" | "price-only") {
     if (!pullback) return `<div class="moment-verdict unknown">${this.simple ? "Reading the chart…" : "Loading candles…"}</div>`;
     if (!pullback.ready) {
       const text = pullback.reason === "source-unavailable"
@@ -734,12 +737,15 @@ class App {
         : pullback.toppingTail
           ? this.simple ? "Buyers pushed it up but sellers shoved it straight back — a common warning sign. Wait." : "Topping tail on the latest candle — wait."
           : this.simple ? "It's taking a breather. Wait for it to start climbing again before acting." : "Pullback in progress — wait for the first candle to break the prior high.";
+    const priceOnly = precision === "price-only";
     const checks = [
       { label: this.simple ? "Kept most of its rise" : "Retracement ≤ 50%", pass: pullback.retracementPercent <= 50, detail: `${pullback.retracementPercent.toFixed(0)}%` },
-      { label: this.simple ? "Buyers busier than sellers" : "Green volume ≥ red volume", pass: pullback.greenVolumeDominant, detail: "" },
-      { label: this.simple ? "Above its average price today" : "Above VWAP", pass: pullback.aboveVwap, detail: this.money(pullback.vwap) },
+      ...priceOnly ? [] : [
+        { label: this.simple ? "Buyers busier than sellers" : "Green volume ≥ red volume", pass: pullback.greenVolumeDominant, detail: "" },
+        { label: this.simple ? "Above its average price today" : "Above VWAP", pass: pullback.aboveVwap, detail: this.money(pullback.vwap) }
+      ],
       { label: this.simple ? "Above its recent trend" : "Above 9 EMA", pass: pullback.aboveEma9, detail: this.money(pullback.ema9) },
-      { label: this.simple ? "No nasty rejection at the top" : "No topping tail", pass: !pullback.toppingTail, detail: "" },
+      ...priceOnly ? [] : [{ label: this.simple ? "No nasty rejection at the top" : "No topping tail", pass: !pullback.toppingTail, detail: "" }],
       { label: this.simple ? "Starting to climb again" : "Breaking prior candle high", pass: pullback.breakingHigher, detail: "" }
     ];
     return `
@@ -747,6 +753,7 @@ class App {
       <div class="check-list">
         ${checks.map((check) => `<span class="tick ${check.pass ? "pass" : ""}"><span class="tick-mark">${check.pass ? "✓" : "·"}</span><span>${this.escape(check.label)}${check.detail ? ` — ${this.escape(check.detail)}` : ""}</span></span>`).join("")}
       </div>
+      ${priceOnly ? `<p class="card-meta" style="margin:12px 0 0">${this.simple ? "Based on price movements only — volume detail wasn't available, so treat this reading as rough." : "Price-only source: volume, VWAP and wick checks unavailable."}</p>` : ""}
       <p class="card-meta" style="margin:12px 0 0">${this.simple ? `Suggested get-out price: ${this.money(pullback.pullbackLow)} (the low of the breather).` : `Suggested stop: ${this.money(pullback.pullbackLow)} (pullback low).`}</p>`;
   }
 

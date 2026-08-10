@@ -44,6 +44,8 @@ export interface CandlePayload {
   symbol: string;
   candles: { time: number; open: number; high: number; low: number; close: number; volume: number }[];
   fetchedAt: number;
+  /** "full" = real OHLCV; "price-only" = candles synthesised from price points. */
+  precision: "full" | "price-only";
 }
 
 interface RawQuote { [key: string]: unknown }
@@ -159,5 +161,5 @@ export async function fetchStockCandles(symbol: string): Promise<CandlePayload> 
       candles.push({ time: time * 1_000, open: open as number, high: high as number, low: low as number, close: close as number, volume: typeof volume === "number" ? volume : 0 });
     }
   });
-  return { symbol: symbol.toUpperCase(), candles, fetchedAt: Date.now() };
+  return { symbol: symbol.toUpperCase(), candles, fetchedAt: Date.now(), precision: "full" };
 }

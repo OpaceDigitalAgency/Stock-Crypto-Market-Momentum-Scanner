@@ -1,7 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import { createCatalystCache, runCatalystLookup } from "./server/catalysts-core.ts";
-import { fetchStocksAnySource } from "./server/stocks-source.ts";
-import { fetchStockCandles } from "./server/yahoo.ts";
+import { fetchCandlesAnySource, fetchStocksAnySource } from "./server/stocks-source.ts";
 
 // Serves the same /api routes locally that Netlify Functions serve in production,
 // so `npm run dev` shows live stock data without any extra tooling.
@@ -55,7 +54,7 @@ function marketDataDev(): Plugin {
         if (url.pathname === "/api/candles") {
           void (async () => {
             try {
-              respond(200, await fetchStockCandles(url.searchParams.get("symbol") ?? ""));
+              respond(200, await fetchCandlesAnySource(url.searchParams.get("symbol") ?? ""));
             } catch (error) {
               respond(502, { error: error instanceof Error ? error.message : "Candle source unavailable" });
             }

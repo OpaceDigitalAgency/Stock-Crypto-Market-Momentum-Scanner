@@ -1,9 +1,9 @@
-import { fetchStockCandles } from "../../server/yahoo";
+import { fetchCandlesAnySource } from "../../server/stocks-source";
 
 export default async function handler(request: Request): Promise<Response> {
   const symbol = new URL(request.url).searchParams.get("symbol") ?? "";
   try {
-    const payload = await fetchStockCandles(symbol);
+    const payload = await fetchCandlesAnySource(symbol);
     return new Response(JSON.stringify(payload), {
       headers: {
         "content-type": "application/json",
