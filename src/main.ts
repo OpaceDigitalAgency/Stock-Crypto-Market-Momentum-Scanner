@@ -19,6 +19,7 @@ interface Prefs {
   defaultRisk: number;
   dailyLossLimit: number;
   chime: boolean;
+  cryptoActivityWindowHours: 1 | 4 | 24;
 }
 
 const PREFS_KEY = "pulseboard-prefs-v1";
@@ -31,10 +32,11 @@ function loadPrefs(): Prefs {
       mode: raw.mode === "advanced" ? "advanced" : "simple",
       defaultRisk: typeof raw.defaultRisk === "number" && raw.defaultRisk > 0 ? raw.defaultRisk : 50,
       dailyLossLimit: typeof raw.dailyLossLimit === "number" && raw.dailyLossLimit > 0 ? raw.dailyLossLimit : 150,
-      chime: raw.chime === true
+      chime: raw.chime === true,
+      cryptoActivityWindowHours: raw.cryptoActivityWindowHours === 1 || raw.cryptoActivityWindowHours === 24 ? raw.cryptoActivityWindowHours : 4
     };
   } catch {
-    return { mode: "simple", defaultRisk: 50, dailyLossLimit: 150, chime: false };
+    return { mode: "simple", defaultRisk: 50, dailyLossLimit: 150, chime: false, cryptoActivityWindowHours: 4 };
   }
 }
 
@@ -128,7 +130,7 @@ class App {
   private pullbacks = new Map<string, { result: PullbackResult; at: number; precision: "full" | "price-only"; candles: Candle[] }>();
   private cryptoNews = new Map<string, { news: { count: number; url?: string; title?: string; publisher?: string; kind?: string } | null; at: number }>();
   private cryptoNewsPending = new Set<string>();
-  private cryptoDailyRvol = new Map<string, { ratio: number; at: number }>();
+  private cryptoActivityBase = new Map<string, { avgDailyQuote: number; hourlyQuote: number[]; at: number }>();
   private pullbackPending = new Set<string>();
 
   private pendingDeleteId?: string;
@@ -309,25 +311,44 @@ class App {
   }
 
   // The stock strategy compares today's activity with a ~50-day average.
-  // This is the crypto equivalent: today's 24h quote volume versus the mean
-  // of the last 30 completed daily candles on Binance.
+  // This is the crypto equivalent: recent quote volume (over a selectable
+  // window) versus what the coin's last 30 days say is normal for that
+  // window length.
   private async enrichCryptoDailyBaseline(candidate: Candidate) {
-    const cached = this.cryptoDailyRvol.get(candidate.symbol);
+    const cached = this.cryptoActivityBase.get(candidate.symbol);
     if (cached && Date.now() - cached.at < 30 * 60_000) return;
     try {
-      const response = await fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/klines?symbol=${encodeURIComponent(candidate.symbol)}&interval=1d&limit=31`);
-      if (!response.ok) throw new Error("Daily klines unavailable");
-      const days = parseBinanceKlines(await response.json());
-      const completed = days.slice(0, -1);
-      if (completed.length < 7) return;
-      const average = completed.reduce((sum, day) => sum + day.quoteVolume, 0) / completed.length;
-      if (average > 0 && candidate.volume > 0) {
-        this.cryptoDailyRvol.set(candidate.symbol, { ratio: candidate.volume / average, at: Date.now() });
-        if (this.assetClass === "crypto") this.refreshDiscoverData();
-      }
+      const [dailyResponse, hourlyResponse] = await Promise.all([
+        fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/klines?symbol=${encodeURIComponent(candidate.symbol)}&interval=1d&limit=31`),
+        fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/klines?symbol=${encodeURIComponent(candidate.symbol)}&interval=1h&limit=25`)
+      ]);
+      if (!dailyResponse.ok || !hourlyResponse.ok) throw new Error("Baseline klines unavailable");
+      const completedDays = parseBinanceKlines(await dailyResponse.json()).slice(0, -1);
+      const hours = parseBinanceKlines(await hourlyResponse.json());
+      if (completedDays.length < 7 || !hours.length) return;
+      const avgDailyQuote = completedDays.reduce((sum, day) => sum + day.quoteVolume, 0) / completedDays.length;
+      if (avgDailyQuote <= 0) return;
+      this.cryptoActivityBase.set(candidate.symbol, {
+        avgDailyQuote,
+        hourlyQuote: hours.map((hour) => hour.quoteVolume),
+        at: Date.now()
+      });
+      if (this.assetClass === "crypto") this.refreshDiscoverData();
     } catch {
       // Baseline is an enrichment; the 5-minute measure still stands alone.
     }
+  }
+
+  private cryptoActivityRatio(candidate: Candidate): { ratio: number; windowHours: number } | undefined {
+    const base = this.cryptoActivityBase.get(candidate.symbol);
+    if (!base) return undefined;
+    const windowHours = this.prefs.cryptoActivityWindowHours;
+    if (windowHours === 24) {
+      return candidate.volume > 0 ? { ratio: candidate.volume / base.avgDailyQuote, windowHours } : undefined;
+    }
+    const recent = base.hourlyQuote.slice(-windowHours).reduce((sum, value) => sum + value, 0);
+    const expected = (base.avgDailyQuote / 24) * windowHours;
+    return expected > 0 ? { ratio: recent / expected, windowHours } : undefined;
   }
 
   private applyCryptoDetails(candidates: Candidate[]) {
@@ -437,8 +458,11 @@ class App {
 
   private overallVerdict(candidate: Candidate, ticks: Tick[]) {
     const passes = ticks.filter((tick) => tick.state === "pass").length;
-    const strong = passes >= 4;
-    const weak = passes <= 2;
+    const fails = ticks.filter((tick) => tick.state === "fail").length;
+    // Unknown ticks are neutral: a coin missing a data point is not a coin
+    // that failed a check. Strong = mostly passing with at most one failure.
+    const strong = passes >= 3 && fails <= 1;
+    const weak = fails >= 3 || passes <= 1;
     const moment = this.momentVerdict(candidate);
     if (weak) return { cls: "skip", label: this.simple ? "Skip this one" : "Skip · weak quality", passes };
     if (!strong) return { cls: "mid", label: this.simple ? "Borderline — be careful" : "Borderline", passes };
@@ -557,13 +581,14 @@ class App {
     const movingNow = momentumKnown && ((candidate.momentum5m ?? 0) > 0 || (candidate.momentum1h ?? 0) > 0);
     const busy = candidate.relativeVolume >= Math.max(filters.minRelativeVolume, 1.2);
     const tradeable = candidate.spreadPercent <= filters.maxSpreadPercent && candidate.volume >= filters.minQuoteVolumeMillions * 1_000_000;
-    const daily = this.cryptoDailyRvol.get(candidate.symbol);
+    const activity = this.cryptoActivityRatio(candidate);
+    const windowLabel = this.prefs.cryptoActivityWindowHours === 24 ? "last day" : this.prefs.cryptoActivityWindowHours === 4 ? "last 4 hours" : "last hour";
     return [
       { label: this.simple ? "Up a lot today" : `24h move ≥ ${filters.minChange}%`, detail: `${this.percent(candidate.changePercent)} in 24 hours`, state: candidate.changePercent >= filters.minChange ? "pass" : "fail" },
       { label: this.simple ? "Moving right now" : "Positive 5m/1h momentum", detail: momentumKnown ? `${this.percent(candidate.momentum5m ?? 0)} in 5 min · ${this.percent(candidate.momentum1h ?? 0)} in 1 hour` : "Still measuring", state: !momentumKnown ? "unknown" : movingNow ? "pass" : "fail" },
-      daily
-        ? { label: this.simple ? "Much busier than normal" : "24h volume vs 30-day average", detail: `${daily.ratio.toFixed(1)}× its usual daily trading`, state: daily.ratio >= 2 ? "pass" as const : "fail" as const }
-        : { label: this.simple ? "Much busier than normal" : "24h volume vs 30-day average", detail: "Measuring its usual day…", state: "unknown" as const },
+      activity
+        ? { label: this.simple ? "Much busier than normal" : `Volume vs 30-day norm (${windowLabel})`, detail: `${activity.ratio.toFixed(1)}× its usual pace (${windowLabel} vs its last month)`, state: activity.ratio >= 2 ? "pass" as const : "fail" as const }
+        : { label: this.simple ? "Much busier than normal" : "Volume vs 30-day norm", detail: "Measuring its usual pace…", state: "unknown" as const },
       { label: this.simple ? "Busy this very hour" : "5m activity above recent norm", detail: `${candidate.relativeVolume.toFixed(1)}× its last hour's pace`, state: busy ? "pass" : "fail" },
       { label: this.simple ? "Easy to buy and sell" : "Spread and volume within limits", detail: `${candidate.spreadPercent.toFixed(2)}% spread`, state: tradeable ? "pass" : "fail" },
       { label: this.simple ? "Price checked on two venues" : "Coinbase cross-check", detail: candidate.crossVenue ? "Binance and Coinbase agree" : "Binance only", state: candidate.crossVenue ? "pass" : "unknown" },
@@ -665,7 +690,7 @@ class App {
           <details>
             <summary>What counts as "normal"?</summary>
             <p>For shares, today's trading volume is compared with the stock's recent daily average (roughly the last one to three months, depending on the data source). The strategy this is based on uses five times the 50-day average as its signal; this app uses the closest average its free data provides, and says "usual volume unknown" rather than guessing when none is available.</p>
-            <p>For crypto, "much busier than normal" now works the same way as shares: today's 24-hour trading is compared with the coin's average day over the last month. A second, faster measure ("busy this very hour") compares each completed five-minute period with the previous twelve — an adaptation for 24/7 markets that shows whether the burst is happening right now.</p>
+            <p>For crypto, "much busier than normal" works the same way as shares: recent trading is compared with what the coin's last 30 days say is normal for that stretch of time. You choose the stretch — the last hour catches a burst as it starts, the last 4 hours (the default) shows a developing move, and the whole day shows sustained unusual interest. A separate "busy this very hour" measure compares each five-minute period with the previous twelve.</p>
             <p>Speed of rise is measured over three windows for crypto (5 minutes, 1 hour, 24 hours) and as today's percentage gain for shares.</p>
           </details>
         </section>
@@ -728,8 +753,14 @@ class App {
       <label>${this.simple ? "How much busier than normal" : "Minimum relative volume"}<input id="min-rvol" type="number" min="0" step="0.5" value="${filters.minRelativeVolume}"><span class="unit">×</span></label>
       ${this.simple ? "" : `<label>Maximum shares in issue<input id="max-float" type="number" min="0" step="1" value="${filters.maxFloatMillions}"><span class="unit">m</span></label>`}
     `;
+    const windowHours = this.prefs.cryptoActivityWindowHours;
     const cryptoFields = `
       <label>${this.simple ? "Minimum rise (24h)" : "Minimum 24h move"}<input id="min-change" type="number" step="0.5" value="${filters.minChange}"><span class="unit">%</span></label>
+      <label>${this.simple ? "Compare busyness over" : "Activity window vs 30-day norm"}<select id="activity-window">
+        <option value="1" ${windowHours === 1 ? "selected" : ""}>${this.simple ? "The last hour" : "1 hour"}</option>
+        <option value="4" ${windowHours === 4 ? "selected" : ""}>${this.simple ? "The last 4 hours" : "4 hours"}</option>
+        <option value="24" ${windowHours === 24 ? "selected" : ""}>${this.simple ? "The whole day" : "24 hours"}</option>
+      </select></label>
       <label>${this.simple ? "How much busier than usual" : "Minimum 5m activity ratio"}<input id="min-rvol" type="number" min="0" step="0.1" value="${filters.minRelativeVolume}"><span class="unit">×</span></label>
       ${this.simple ? "" : `
       <label>Minimum quote volume<input id="min-volume" type="number" min="0" step="1" value="${filters.minQuoteVolumeMillions}"><span class="unit">$m</span></label>
@@ -1266,6 +1297,12 @@ class App {
       this.rescoreAll();
       this.refreshCandidateResults();
     }));
+    this.root.querySelector<HTMLSelectElement>("#activity-window")?.addEventListener("change", (event) => {
+      const value = Number((event.currentTarget as HTMLSelectElement).value);
+      this.prefs.cryptoActivityWindowHours = value === 1 || value === 24 ? value : 4;
+      this.savePrefs();
+      this.refreshCandidateResults();
+    });
     this.root.querySelector<HTMLInputElement>("#chime")?.addEventListener("change", (event) => {
       this.prefs.chime = (event.currentTarget as HTMLInputElement).checked;
       this.savePrefs();
