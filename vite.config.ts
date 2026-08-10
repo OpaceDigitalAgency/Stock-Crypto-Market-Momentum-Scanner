@@ -1,10 +1,12 @@
 import { defineConfig, type Plugin } from "vite";
+import { createCatalystCache, runCatalystLookup } from "./server/catalysts-core.ts";
 import { fetchStockCandles, fetchTopStocks } from "./server/yahoo.ts";
 
 // Serves the same /api routes locally that Netlify Functions serve in production,
 // so `npm run dev` shows live stock data without any extra tooling.
 function marketDataDev(): Plugin {
   let stocksCache: { payload: unknown; at: number } | null = null;
+  const catalystCache = createCatalystCache();
   return {
     name: "market-data-dev",
     configureServer(server) {
@@ -27,6 +29,26 @@ function marketDataDev(): Plugin {
               else respond(502, { error: error instanceof Error ? error.message : "Stock source unavailable" });
             }
           })();
+          return;
+        }
+        if (url.pathname === "/.netlify/functions/catalysts") {
+          const stream = req as unknown as { on(event: string, callback: (chunk?: unknown) => void): void };
+          let raw = "";
+          stream.on("data", (chunk) => { raw += String(chunk); });
+          stream.on("end", () => {
+            void (async () => {
+              try {
+                const body: unknown = JSON.parse(raw || "{}");
+                const reports = await runCatalystLookup(body, {
+                  secUserAgent: (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SEC_USER_AGENT,
+                  cache: catalystCache
+                });
+                respond(200, { reports });
+              } catch (error) {
+                respond(400, { error: error instanceof Error ? error.message : "Invalid catalyst request" });
+              }
+            })();
+          });
           return;
         }
         if (url.pathname === "/api/candles") {

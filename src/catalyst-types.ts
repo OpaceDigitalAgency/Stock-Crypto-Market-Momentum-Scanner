@@ -24,12 +24,23 @@ export interface CatalystSourceStatus {
   message: string;
 }
 
+export interface NewsMentions {
+  count: number;
+  topTitle?: string;
+  topUrl?: string;
+  publisher?: string;
+  publishedAt?: string;
+  source: "yahoo-news";
+  confidence: "reported";
+}
+
 export interface CatalystReport {
   symbol: string;
   state: CatalystState;
   checkedAt: string;
   evidence: CatalystEvidence[];
   sources: CatalystSourceStatus[];
+  news?: NewsMentions;
 }
 
 export interface CatalystLookupRequest {

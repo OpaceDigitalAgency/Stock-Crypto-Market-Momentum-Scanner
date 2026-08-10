@@ -1,6 +1,6 @@
-import { createMemoryCatalystCache, lookupOfficialCatalysts } from "../../src/catalyst-service";
+import { createCatalystCache, runCatalystLookup } from "../../server/catalysts-core";
 
-const sourceCache = createMemoryCatalystCache();
+const sourceCache = createCatalystCache();
 
 function json(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -19,7 +19,7 @@ export default async (request: Request) => {
   if (Number.isFinite(contentLength) && contentLength > 8_192) return json(413, { error: "Request body is too large" });
   try {
     const payload = await request.json();
-    const reports = await lookupOfficialCatalysts(payload, {
+    const reports = await runCatalystLookup(payload, {
       secUserAgent: Netlify.env.get("SEC_USER_AGENT"),
       cache: sourceCache
     });

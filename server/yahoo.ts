@@ -106,6 +106,38 @@ export async function fetchTopStocks(): Promise<StocksPayload> {
   return { quotes, fetchedAt: Date.now(), screens: succeeded, source: "yahoo-finance" };
 }
 
+export interface SymbolNews {
+  count: number;
+  topTitle?: string;
+  topUrl?: string;
+  publisher?: string;
+  publishedAt?: string;
+}
+
+const NEWS_MAX_AGE_MS = 36 * 3_600_000;
+
+export async function fetchSymbolNews(symbol: string): Promise<SymbolNews> {
+  const clean = symbol.trim().toUpperCase();
+  if (!/^[A-Z0-9.\-]{1,12}$/.test(clean)) throw new Error("Invalid symbol");
+  const response = await fetchWithHostFallback(`/v1/finance/search?q=${encodeURIComponent(clean)}&newsCount=8&quotesCount=0&enableFuzzyQuery=false`);
+  if (!response.ok) throw new Error(`Yahoo news responded ${response.status}`);
+  const payload = await response.json() as { news?: { title?: string; link?: string; publisher?: string; providerPublishTime?: number }[] };
+  const now = Date.now();
+  const recent = (payload.news ?? []).filter((item) =>
+    typeof item.title === "string"
+    && typeof item.providerPublishTime === "number"
+    && now - item.providerPublishTime * 1_000 < NEWS_MAX_AGE_MS
+  );
+  const top = recent[0];
+  return {
+    count: recent.length,
+    topTitle: top?.title,
+    topUrl: typeof top?.link === "string" ? top.link : undefined,
+    publisher: top?.publisher,
+    publishedAt: top?.providerPublishTime ? new Date(top.providerPublishTime * 1_000).toISOString() : undefined
+  };
+}
+
 export async function fetchStockCandles(symbol: string): Promise<CandlePayload> {
   if (!/^[A-Z0-9.\-]{1,12}$/i.test(symbol)) throw new Error("Invalid symbol");
   const response = await fetchWithHostFallback(`/v8/finance/chart/${encodeURIComponent(symbol.toUpperCase())}?interval=1m&range=1d&includePrePost=true`);

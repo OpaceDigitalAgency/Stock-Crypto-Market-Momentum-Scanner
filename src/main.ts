@@ -156,7 +156,7 @@ class App {
           const base = mapStockQuote(quote, receiptTime);
           const report = this.catalystReports.get(base.symbol);
           const withCatalyst = report
-            ? { ...base, catalyst: report.state === "confirmed" ? "confirmed" as const : "none" as const, catalystState: report.state, catalystEvidence: report.evidence }
+            ? { ...base, ...this.catalystFields(report) }
             : { ...base, catalystState: "checking" as const };
           return { ...withCatalyst, score: scoreCandidate(withCatalyst, this.filters.stocks) };
         });
@@ -190,13 +190,23 @@ class App {
       this.stockCandidates = this.stockCandidates.map((candidate) => {
         const report = this.catalystReports.get(candidate.symbol);
         if (!report) return candidate;
-        const enriched = { ...candidate, catalyst: report.state === "confirmed" ? "confirmed" as const : "none" as const, catalystState: report.state, catalystEvidence: report.evidence };
+        const enriched = { ...candidate, ...this.catalystFields(report) };
         return { ...enriched, score: scoreCandidate(enriched, this.filters.stocks) };
       });
     } catch {
       this.stockCandidates = this.stockCandidates.map((candidate) => candidate.catalystState === "checking" ? { ...candidate, catalystState: "source-unavailable" as const } : candidate);
     }
     if (this.assetClass === "stocks") this.refreshDiscoverData();
+  }
+
+  private catalystFields(report: CatalystReport) {
+    const news = report.news && report.news.count > 0
+      ? { count: report.news.count, url: report.news.topUrl, title: report.news.topTitle, publisher: report.news.publisher }
+      : undefined;
+    const catalyst = report.state === "confirmed" ? "confirmed" as const
+      : news ? "unverified" as const
+      : "none" as const;
+    return { catalyst, catalystState: report.state, catalystEvidence: report.evidence, catalystNews: news };
   }
 
   /* ---------- Data: crypto ---------- */
@@ -397,9 +407,24 @@ class App {
         { label: this.simple ? "Much busier than normal" : `Relative volume ≥ ${filters.minRelativeVolume}×`, detail: rvolKnown ? `${candidate.relativeVolume.toFixed(1)}× its usual trading` : "Usual volume unknown", state: !rvolKnown ? "unknown" : rvolOk ? "pass" : "fail" },
         { label: this.simple ? "In your price range" : `Price $${filters.minPrice}–$${filters.maxPrice}`, detail: this.money(candidate.price), state: priceOk ? "pass" : "fail" },
         { label: this.simple ? "Only a small number of shares exist" : `Shares in issue ≤ ${filters.maxFloatMillions}m`, detail: sharesKnown ? `${(candidate.floatOrMarketCap as number).toFixed(0)}m shares in issue` : "Share count unknown", state: !sharesKnown ? "unknown" : sharesOk ? "pass" : "fail" },
-        { label: this.simple ? "Clear reason for the move" : "Catalyst confirmed", detail: candidate.catalystState === "confirmed" ? "Official filing or halt found" : candidate.catalystState === "no-evidence" ? "No official news found" : "Not checked yet", state: !catalystChecked ? "unknown" : candidate.catalystState === "confirmed" ? "pass" : "fail" }
+        this.catalystTick(candidate, catalystChecked)
       ];
     }
+    return this.cryptoTicks(candidate, filters);
+  }
+
+  private catalystTick(candidate: Candidate, catalystChecked: boolean): Tick {
+    const label = this.simple ? "Clear reason for the move" : "Catalyst";
+    if (candidate.catalystState === "confirmed") return { label, detail: this.simple ? "Official filing or halt found" : "Official evidence confirmed", state: "pass" };
+    if (candidate.catalystNews) {
+      const headline = candidate.catalystNews.title ? `“${candidate.catalystNews.title}”` : `${candidate.catalystNews.count} recent stories`;
+      return { label, detail: this.simple ? `In the news — ${headline}` : `Reported: ${headline}${candidate.catalystNews.publisher ? ` (${candidate.catalystNews.publisher})` : ""}`, state: "pass" };
+    }
+    if (!catalystChecked) return { label, detail: "Not checked yet", state: "unknown" };
+    return { label, detail: "No official news found", state: "fail" };
+  }
+
+  private cryptoTicks(candidate: Candidate, filters: Filters): Tick[] {
     const momentumKnown = candidate.momentum5m !== null && candidate.momentum5m !== undefined;
     const movingNow = momentumKnown && ((candidate.momentum5m ?? 0) > 0 || (candidate.momentum1h ?? 0) > 0);
     const busy = candidate.relativeVolume >= Math.max(filters.minRelativeVolume, 1.2);
@@ -591,13 +616,18 @@ class App {
 
   private renderStockRow(row: Candidate) {
     const moveClass = row.changePercent >= 0 ? "positive" : "negative";
+    const news = row.catalystNews
+      ? row.catalystNews.url && this.safeUrl(row.catalystNews.url)
+        ? `<a class="text-button" href="${this.escape(row.catalystNews.url)}" target="_blank" rel="noopener noreferrer">News (${row.catalystNews.count})</a><small>${this.escape(row.catalystNews.publisher ?? "reported")}</small>`
+        : `News (${row.catalystNews.count})<small>${this.escape(row.catalystNews.publisher ?? "reported")}</small>`
+      : null;
     const catalyst = row.catalystState === "confirmed"
       ? row.catalystEvidence?.[0] && this.safeUrl(row.catalystEvidence[0].url)
         ? `<a class="text-button" href="${this.escape(row.catalystEvidence[0].url)}" target="_blank" rel="noopener noreferrer">Confirmed</a>`
         : "Confirmed"
-      : row.catalystState === "no-evidence" ? "None found"
+      : news ?? (row.catalystState === "no-evidence" ? "None found"
       : row.catalystState === "source-unavailable" ? "Unchecked"
-      : "Checking…";
+      : "Checking…");
     return `<tr>
       <td><strong>${this.escape(row.symbol)}</strong><small>${this.escape(row.name)} · ${this.escape(row.venue)}</small></td>
       <td class="num">${this.money(row.price)}<small>${this.escape(this.dataBadge(row))}</small></td>
