@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+.ibkr-gateway/
+
+# Local/internal working files — not part of the public app
+BRIEF.md
+BRIEF-SIMPLE.md
+PROJECT.md
+.agent/
+.claude/
+companion/
