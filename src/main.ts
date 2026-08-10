@@ -128,6 +128,7 @@ class App {
   private pullbacks = new Map<string, { result: PullbackResult; at: number; precision: "full" | "price-only"; candles: Candle[] }>();
   private cryptoNews = new Map<string, { news: { count: number; url?: string; title?: string; publisher?: string; kind?: string } | null; at: number }>();
   private cryptoNewsPending = new Set<string>();
+  private cryptoDailyRvol = new Map<string, { ratio: number; at: number }>();
   private pullbackPending = new Set<string>();
 
   private pendingDeleteId?: string;
@@ -197,6 +198,8 @@ class App {
         return { ...enriched, score: scoreCandidate(enriched, this.filters.stocks) };
       });
     } catch {
+      // Allow failed symbols to be retried on the next poll.
+      targets.forEach((symbol) => this.catalystsRequested.delete(symbol));
       this.stockCandidates = this.stockCandidates.map((candidate) => candidate.catalystState === "checking" ? { ...candidate, catalystState: "source-unavailable" as const } : candidate);
     }
     if (this.assetClass === "stocks") this.refreshDiscoverData();
@@ -305,6 +308,28 @@ class App {
     }
   }
 
+  // The stock strategy compares today's activity with a ~50-day average.
+  // This is the crypto equivalent: today's 24h quote volume versus the mean
+  // of the last 30 completed daily candles on Binance.
+  private async enrichCryptoDailyBaseline(candidate: Candidate) {
+    const cached = this.cryptoDailyRvol.get(candidate.symbol);
+    if (cached && Date.now() - cached.at < 30 * 60_000) return;
+    try {
+      const response = await fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/klines?symbol=${encodeURIComponent(candidate.symbol)}&interval=1d&limit=31`);
+      if (!response.ok) throw new Error("Daily klines unavailable");
+      const days = parseBinanceKlines(await response.json());
+      const completed = days.slice(0, -1);
+      if (completed.length < 7) return;
+      const average = completed.reduce((sum, day) => sum + day.quoteVolume, 0) / completed.length;
+      if (average > 0 && candidate.volume > 0) {
+        this.cryptoDailyRvol.set(candidate.symbol, { ratio: candidate.volume / average, at: Date.now() });
+        if (this.assetClass === "crypto") this.refreshDiscoverData();
+      }
+    } catch {
+      // Baseline is an enrichment; the 5-minute measure still stands alone.
+    }
+  }
+
   private applyCryptoDetails(candidates: Candidate[]) {
     return candidates.map((candidate) => {
       const detail = this.cryptoDetails.get(candidate.symbol);
@@ -344,6 +369,7 @@ class App {
       this.cryptoDetailFailures.delete(candidate.symbol);
       try {
         const now = Date.now();
+        void this.enrichCryptoDailyBaseline(candidate);
         const [klinesResponse, depthResponse] = await Promise.all([
           fetch(buildBinanceKlinesUrl(candidate.symbol, 300)),
           fetch(`${BINANCE_PUBLIC_REST_ENDPOINT}/api/v3/depth?symbol=${encodeURIComponent(candidate.symbol)}&limit=20`)
@@ -414,12 +440,12 @@ class App {
     const strong = passes >= 4;
     const weak = passes <= 2;
     const moment = this.momentVerdict(candidate);
-    if (weak) return { cls: "skip", label: this.simple ? "Probably skip" : "Weak", passes };
-    if (!strong) return { cls: "mid", label: this.simple ? "Borderline" : "Borderline", passes };
-    if (moment === "entry") return { cls: "go", label: this.simple ? "Worth a look now" : "Strong · entry signal", passes };
-    if (moment === "wait") return { cls: "hold", label: this.simple ? "Strong — not yet" : "Strong · wait", passes };
-    if (moment === "avoid") return { cls: "off", label: this.simple ? "Strong — pattern broke" : "Strong · pattern failed", passes };
-    return { cls: "strong", label: this.simple ? "Strong — checking the moment…" : "Strong · moment unchecked", passes };
+    if (weak) return { cls: "skip", label: this.simple ? "Skip this one" : "Skip · weak quality", passes };
+    if (!strong) return { cls: "mid", label: this.simple ? "Borderline — be careful" : "Borderline", passes };
+    if (moment === "entry") return { cls: "go", label: this.simple ? "✓ Good moment to trade" : "Entry signal", passes };
+    if (moment === "wait") return { cls: "hold", label: this.simple ? "Wait — not yet" : "Wait · pattern forming", passes };
+    if (moment === "avoid") return { cls: "off", label: this.simple ? "Too late — move has faded" : "No trade · pattern failed", passes };
+    return { cls: "strong", label: this.simple ? "Good quality — checking timing…" : "Quality passes · timing unchecked", passes };
   }
 
   private companyTip(candidate: Candidate) {
@@ -465,7 +491,13 @@ class App {
 
   private rankedCandidates(assetClass: AssetClass = this.assetClass) {
     const source = assetClass === "stocks" ? this.stockCandidates : this.cryptoCandidates;
-    return [...source].sort((a, b) => b.score - a.score || b.changePercent - a.changePercent);
+    // Buyable-now candidates first, then strong-but-waiting, then the rest.
+    const momentRank = (candidate: Candidate) => {
+      const verdict = this.momentVerdict(candidate);
+      return verdict === "entry" ? 0 : verdict === "wait" ? 1 : verdict === undefined ? 2 : 3;
+    };
+    return [...source].sort((a, b) =>
+      momentRank(a) - momentRank(b) || b.score - a.score || b.changePercent - a.changePercent);
   }
 
   private ticksFor(candidate: Candidate): Tick[] {
@@ -525,10 +557,14 @@ class App {
     const movingNow = momentumKnown && ((candidate.momentum5m ?? 0) > 0 || (candidate.momentum1h ?? 0) > 0);
     const busy = candidate.relativeVolume >= Math.max(filters.minRelativeVolume, 1.2);
     const tradeable = candidate.spreadPercent <= filters.maxSpreadPercent && candidate.volume >= filters.minQuoteVolumeMillions * 1_000_000;
+    const daily = this.cryptoDailyRvol.get(candidate.symbol);
     return [
       { label: this.simple ? "Up a lot today" : `24h move ≥ ${filters.minChange}%`, detail: `${this.percent(candidate.changePercent)} in 24 hours`, state: candidate.changePercent >= filters.minChange ? "pass" : "fail" },
       { label: this.simple ? "Moving right now" : "Positive 5m/1h momentum", detail: momentumKnown ? `${this.percent(candidate.momentum5m ?? 0)} in 5 min · ${this.percent(candidate.momentum1h ?? 0)} in 1 hour` : "Still measuring", state: !momentumKnown ? "unknown" : movingNow ? "pass" : "fail" },
-      { label: this.simple ? "Busier than usual" : "5m activity above recent norm", detail: `${candidate.relativeVolume.toFixed(1)}× its recent activity`, state: busy ? "pass" : "fail" },
+      daily
+        ? { label: this.simple ? "Much busier than normal" : "24h volume vs 30-day average", detail: `${daily.ratio.toFixed(1)}× its usual daily trading`, state: daily.ratio >= 2 ? "pass" as const : "fail" as const }
+        : { label: this.simple ? "Much busier than normal" : "24h volume vs 30-day average", detail: "Measuring its usual day…", state: "unknown" as const },
+      { label: this.simple ? "Busy this very hour" : "5m activity above recent norm", detail: `${candidate.relativeVolume.toFixed(1)}× its last hour's pace`, state: busy ? "pass" : "fail" },
       { label: this.simple ? "Easy to buy and sell" : "Spread and volume within limits", detail: `${candidate.spreadPercent.toFixed(2)}% spread`, state: tradeable ? "pass" : "fail" },
       { label: this.simple ? "Price checked on two venues" : "Coinbase cross-check", detail: candidate.crossVenue ? "Binance and Coinbase agree" : "Binance only", state: candidate.crossVenue ? "pass" : "unknown" },
       this.catalystTick(candidate, true)
@@ -629,7 +665,7 @@ class App {
           <details>
             <summary>What counts as "normal"?</summary>
             <p>For shares, today's trading volume is compared with the stock's recent daily average (roughly the last one to three months, depending on the data source). The strategy this is based on uses five times the 50-day average as its signal; this app uses the closest average its free data provides, and says "usual volume unknown" rather than guessing when none is available.</p>
-            <p>For crypto there is no traditional daily session, so this app adapts the idea: each completed five-minute period is compared with the previous twelve, so "normal" continually updates using the last hour. This is an adaptation for 24/7 markets, not a rule from the original stock strategy.</p>
+            <p>For crypto, "much busier than normal" now works the same way as shares: today's 24-hour trading is compared with the coin's average day over the last month. A second, faster measure ("busy this very hour") compares each completed five-minute period with the previous twelve — an adaptation for 24/7 markets that shows whether the burst is happening right now.</p>
             <p>Speed of rise is measured over three windows for crypto (5 minutes, 1 hour, 24 hours) and as today's percentage gain for shares.</p>
           </details>
         </section>
@@ -716,7 +752,14 @@ class App {
     const ranked = this.rankedCandidates();
     if (!ranked.length) return this.renderEmpty();
     const rows = ranked.slice(0, this.simple ? 12 : 25);
-    return this.simple ? this.renderCards(rows) : this.renderTable(rows);
+    const anyEntry = rows.some((row) => this.momentVerdict(row) === "entry");
+    const anyChecked = rows.some((row) => this.momentVerdict(row) !== undefined);
+    const notice = !anyEntry && anyChecked
+      ? `<p class="no-entry-note">${this.simple
+        ? "Nothing says “worth a look now” at this minute — that's normal. Strong candidates are only buyable for short windows; the badges update live as each chart is re-read."
+        : "No active entry signals. Verdicts refresh as candles update."}</p>`
+      : "";
+    return `${notice}${this.simple ? this.renderCards(rows) : this.renderTable(rows)}`;
   }
 
   private renderEmpty() {
@@ -910,7 +953,7 @@ class App {
         : "Quality passes; pattern incomplete. Wait for the first candle to break the prior high.";
     } else if (moment === "avoid") {
       action = this.simple
-        ? "It was strong earlier, but the healthy pattern has broken — it gave back too much or slipped below its average. Leave it unless a fresh rise starts."
+        ? "It gave back too much of its rise — leave it until a fresh rise starts. The badge will change if that happens."
         : "Pattern failed (deep retrace or below VWAP/EMA). Stand aside unless a new leg forms.";
     } else {
       action = this.simple
@@ -937,7 +980,7 @@ class App {
       ? this.simple ? "It rose, took a breather, and is starting to climb again — this is the moment the strategy looks for." : "Pullback held and the latest candle is breaking the prior high — valid entry signal."
       : pullback.verdict === "avoid"
         ? pullback.retracementPercent > 50
-          ? this.simple ? "It gave back too much of its rise — better to wait for a fresh move." : `Retraced ${pullback.retracementPercent.toFixed(0)}% of the move — pattern failed.`
+          ? this.simple ? "It gave back too much of its rise — leave it until a fresh rise starts." : `Retraced ${pullback.retracementPercent.toFixed(0)}% of the move — pattern failed.`
           : this.simple ? "It has slipped below its average price today — better to stay out." : "Price is below VWAP and the 9 EMA — no edge."
         : pullback.toppingTail
           ? this.simple ? "Buyers pushed it up but sellers shoved it straight back — a common warning sign. Wait." : "Topping tail on the latest candle — wait."
