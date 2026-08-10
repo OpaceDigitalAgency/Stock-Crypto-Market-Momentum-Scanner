@@ -27,6 +27,8 @@ export interface Candidate {
   lifecycleState?: "current" | "cooling" | "stale";
   dataMode?: string;
   marketState?: string;
+  sector?: string;
+  industry?: string;
   missing?: string[];
   catalystState?: "checking" | "confirmed" | "no-evidence" | "source-unavailable";
   catalystEvidence?: { title: string; url: string; publishedAt: string }[];

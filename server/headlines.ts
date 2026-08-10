@@ -17,7 +17,7 @@ const CATEGORY_RULES: [RegExp, string][] = [
   [/\b(why is|rally(ing)?|surge[ds]?|soar(s|ed)?|jump(s|ed)?|spik(es|ed)|explod)\b/i, "Coverage of the move"]
 ];
 
-const ROUNDUP_PATTERN = /\b(movers|top gainers|top losers|stocks to watch|stocks to buy|market wrap|midday|premarket movers|after-hours movers|newsletter|things to know|watchlist|weekly recap|best stocks|hot stocks|price today|live price|chart & market data|price prediction|price analysis|technical analysis|how to buy|where to buy)\b/i;
+const ROUNDUP_PATTERN = /\b(movers|top gainers|top losers|stocks to watch|stocks to buy|market wrap|midday|premarket movers|after-hours movers|newsletter|things to know|watchlist|weekly recap|best stocks|hot stocks|price today|live price|chart & market data|price prediction|price analysis|technical analysis|how to buy|where to buy|convert \d|exchange rate|calculator|how much is|price chart|price history|market cap of|what is [a-z0-9]+\?|to usd\b|usd to\b)\b/i;
 
 export function isRoundupHeadline(title: string): boolean {
   return ROUNDUP_PATTERN.test(title);

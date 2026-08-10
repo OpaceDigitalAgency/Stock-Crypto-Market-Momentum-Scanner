@@ -15,6 +15,8 @@ export interface StockQuotePayload {
   delayMinutes: number;
   sourceTime: number;
   quoteSource: string;
+  sector?: string;
+  industry?: string;
 }
 
 export interface StocksResponse {
@@ -47,7 +49,9 @@ export function mapStockQuote(quote: StockQuotePayload, receiptTime: number): Om
     receiptTime,
     coverage: quote.delayMinutes > 0 ? "delayed" : "single-venue",
     dataMode: quote.delayMinutes > 0 ? `Delayed ${quote.delayMinutes} min` : quote.quoteSource,
-    marketState: quote.marketState
+    marketState: quote.marketState,
+    sector: quote.sector,
+    industry: quote.industry
   };
 }
 

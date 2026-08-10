@@ -398,7 +398,37 @@ class App {
     } finally {
       this.pullbackPending.delete(candidate.symbol);
       if (this.view === "plan" && this.selected?.symbol === candidate.symbol) this.render();
+      else if (this.view === "discover") this.refreshCandidateResults();
     }
+  }
+
+  /* ---------- Verdicts ---------- */
+
+  private momentVerdict(candidate: Candidate): "entry" | "wait" | "avoid" | undefined {
+    const record = this.pullbacks.get(candidate.symbol);
+    return record?.result.ready ? record.result.verdict : undefined;
+  }
+
+  private overallVerdict(candidate: Candidate, ticks: Tick[]) {
+    const passes = ticks.filter((tick) => tick.state === "pass").length;
+    const strong = passes >= 4;
+    const weak = passes <= 2;
+    const moment = this.momentVerdict(candidate);
+    if (weak) return { cls: "skip", label: this.simple ? "Probably skip" : "Weak", passes };
+    if (!strong) return { cls: "mid", label: this.simple ? "Borderline" : "Borderline", passes };
+    if (moment === "entry") return { cls: "go", label: this.simple ? "Worth a look now" : "Strong · entry signal", passes };
+    if (moment === "wait") return { cls: "hold", label: this.simple ? "Strong — not yet" : "Strong · wait", passes };
+    if (moment === "avoid") return { cls: "off", label: this.simple ? "Strong — pattern broke" : "Strong · pattern failed", passes };
+    return { cls: "strong", label: this.simple ? "Strong — checking the moment…" : "Strong · moment unchecked", passes };
+  }
+
+  private companyTip(candidate: Candidate) {
+    if (candidate.assetClass === "crypto") {
+      const base = this.displaySymbol(candidate);
+      return `${base} is the coin being traded. USDT (Tether, a dollar-tracking token) is the currency used to price it on Binance. This row describes the ${base}/USDT trading pair, not the whole project.`;
+    }
+    const business = candidate.sector ? ` — ${candidate.sector}${candidate.industry ? ` · ${candidate.industry}` : ""}` : "";
+    return `${candidate.name}${business}. Listed on ${candidate.venue || "a US exchange"}.`;
   }
 
   /* ---------- Chime ---------- */
@@ -598,8 +628,8 @@ class App {
           <p>It spots unusual activity by comparing today's trading with what is normally seen, and finds fast risers by measuring how quickly the price has increased.</p>
           <details>
             <summary>What counts as "normal"?</summary>
-            <p>For shares, today's trading volume is compared with the average of the last three months — five times busier than usual is the classic momentum signal.</p>
-            <p>For crypto, each completed five-minute period is compared with the previous twelve five-minute periods, so "normal" continually updates using the last hour.</p>
+            <p>For shares, today's trading volume is compared with the stock's recent daily average (roughly the last one to three months, depending on the data source). The strategy this is based on uses five times the 50-day average as its signal; this app uses the closest average its free data provides, and says "usual volume unknown" rather than guessing when none is available.</p>
+            <p>For crypto there is no traditional daily session, so this app adapts the idea: each completed five-minute period is compared with the previous twelve, so "normal" continually updates using the last hour. This is an adaptation for 24/7 markets, not a rule from the original stock strategy.</p>
             <p>Speed of rise is measured over three windows for crypto (5 minutes, 1 hour, 24 hours) and as today's percentage gain for shares.</p>
           </details>
         </section>
@@ -609,8 +639,9 @@ class App {
           <p>It checks legitimacy by looking at trading volume, liquidity and genuine company or project news.</p>
           <details>
             <summary>The five checks behind the ticks</summary>
-            <p>A strong candidate is up a lot, trading much busier than normal, priced where big percentage moves actually happen, short of supply (few shares in issue), and moving for a reason you can read — an official filing, a trading halt, or a news headline. Each card shows exactly which of these pass.</p>
+            <p>A strong candidate is up a lot, trading much busier than normal, priced where big percentage moves actually happen, short of supply (few shares in issue — the app uses total shares in issue as its stand-in for tradable float), and moving for a reason you can read — an official filing, a trading halt, or a news headline. Each card shows exactly which of these pass.</p>
             <p>Then the chart shape is read: a genuine move usually rises, takes a small breather without giving back more than half its rise, and starts climbing again. Fakes tend to collapse straight back down.</p>
+            <p><strong>These are two separate stages on purpose.</strong> A stock can be a strong candidate all day yet only be buyable for a few minutes of it — so a card can honestly say "strong" while the moment check says "not yet". The card badge combines both.</p>
           </details>
         </section>
         <section class="panel how-card">
@@ -702,27 +733,35 @@ class App {
   }
 
   private renderCards(rows: Candidate[]) {
+    // Judge the moment for the strongest visible cards so the badge can say
+    // "worth a look now" versus "not yet" without opening each plan.
+    rows.slice(0, 8).forEach((row) => void this.ensurePullback(row));
     return `<div class="card-grid">${rows.map((row) => {
       const ticks = this.ticksFor(row);
-      const passes = ticks.filter((tick) => tick.state === "pass").length;
+      const verdict = this.overallVerdict(row, ticks);
       const moveClass = row.changePercent >= 0 ? "positive" : "negative";
-      return `<article class="candidate-card">
+      return `<article class="candidate-card verdict-${verdict.cls}">
         <div class="card-top">
-          <div><span class="card-symbol">${this.escape(this.displaySymbol(row))}</span><span class="card-name">${this.escape(row.name)}</span></div>
-          <div style="text-align:right"><span class="card-move ${moveClass}">${this.percent(row.changePercent)}</span><br><span class="card-price">${this.money(row.price)}</span></div>
+          <div class="card-id">
+            <span class="card-symbol">${this.escape(this.displaySymbol(row))}<button class="help-tip" type="button" data-tip="${this.escape(this.companyTip(row))}" aria-label="${this.escape(this.companyTip(row))}">?</button></span>
+            <span class="card-name">${this.escape(row.name)}</span>
+          </div>
+          <div class="card-move-wrap"><span class="card-move ${moveClass}">${this.percent(row.changePercent)}</span><span class="card-price">${this.money(row.price)}</span></div>
         </div>
+        <div class="verdict-chip ${verdict.cls}">${this.escape(verdict.label)}</div>
         <div class="tick-row">
           ${ticks.map((tick) => `<span class="tick ${tick.state === "pass" ? "pass" : tick.state === "unknown" ? "unknown" : ""}"><span class="tick-mark">${tick.state === "pass" ? "✓" : tick.state === "unknown" ? "?" : "·"}</span><span>${this.escape(tick.label)} — ${this.escape(tick.detail)}</span></span>`).join("")}
         </div>
         <div class="card-foot">
-          <span class="card-meta">${passes} of ${ticks.length} · ${this.escape(this.dataBadge(row))}</span>
-          <button class="row-action" data-symbol="${this.escape(row.symbol)}">Make a plan</button>
+          <span class="card-meta">${verdict.passes} of ${ticks.length} · ${this.escape(this.dataBadge(row))}</span>
+          <button class="row-action" data-symbol="${this.escape(row.symbol)}">${this.simple ? "Check & plan" : "Plan"}</button>
         </div>
       </article>`;
     }).join("")}</div>`;
   }
 
   private renderTable(rows: Candidate[]) {
+    rows.slice(0, 8).forEach((row) => void this.ensurePullback(row));
     const stockHead = `<tr><th>Symbol</th><th>Price</th><th>Move</th><th>RVol</th><th>Volume</th><th>Shares</th><th>Catalyst</th><th>Score</th><th></th></tr>`;
     const cryptoHead = `<tr><th>Pair</th><th>Price</th><th>5m</th><th>1h</th><th>24h</th><th>Activity</th><th>Spread</th><th>Venues</th><th>Score</th><th></th></tr>`;
     return `<div class="table-wrap"><table>
@@ -745,8 +784,9 @@ class App {
       : news ?? (row.catalystState === "no-evidence" ? "None found"
       : row.catalystState === "source-unavailable" ? "Unchecked"
       : "Checking…");
+    const verdict = this.overallVerdict(row, this.ticksFor(row));
     return `<tr>
-      <td><strong>${this.escape(row.symbol)}</strong><small>${this.escape(row.name)} · ${this.escape(row.venue)}</small></td>
+      <td><strong>${this.escape(row.symbol)}</strong><button class="help-tip" type="button" data-tip="${this.escape(this.companyTip(row))}" aria-label="${this.escape(this.companyTip(row))}">?</button><small>${this.escape(row.name)}${row.sector ? ` · ${this.escape(row.sector)}` : ""}</small><span class="verdict-chip mini ${verdict.cls}">${this.escape(verdict.label)}</span></td>
       <td class="num">${this.money(row.price)}<small>${this.escape(this.dataBadge(row))}</small></td>
       <td class="num ${moveClass}">${this.percent(row.changePercent)}</td>
       <td class="num">${row.relativeVolume > 0 ? `${row.relativeVolume.toFixed(1)}×` : "—"}</td>
@@ -760,8 +800,9 @@ class App {
 
   private renderCryptoRow(row: Candidate) {
     const moveClass = row.changePercent >= 0 ? "positive" : "negative";
+    const verdict = this.overallVerdict(row, this.ticksFor(row));
     return `<tr>
-      <td><strong>${this.escape(this.displaySymbol(row))}</strong><small>${this.escape(row.venue)} · ${this.age(row.sourceTime)}</small></td>
+      <td><strong>${this.escape(this.displaySymbol(row))}</strong><button class="help-tip" type="button" data-tip="${this.escape(this.companyTip(row))}" aria-label="${this.escape(this.companyTip(row))}">?</button><small>${this.escape(row.venue)} · ${this.age(row.sourceTime)}</small><span class="verdict-chip mini ${verdict.cls}">${this.escape(verdict.label)}</span></td>
       <td class="num">${this.money(row.price)}</td>
       <td class="num">${this.metricValue(row.momentum5m, row.detailState)}</td>
       <td class="num">${this.metricValue(row.momentum1h, row.detailState)}</td>
@@ -799,6 +840,7 @@ class App {
     const pullbackRecord = this.pullbacks.get(selected.symbol);
     const pullback = pullbackRecord?.result;
     const suggestedStop = pullback?.ready && pullback.pullbackLow < selected.price ? pullback.pullbackLow : selected.price * 0.98;
+    const whatToDo = this.renderWhatToDo(selected, ticks, suggestedStop);
     return `
       <div class="plan-head">
         <div>
@@ -808,6 +850,7 @@ class App {
         </div>
         <button class="secondary-button" data-goto="discover">${this.simple ? "Back to movers" : "Back to Discover"}</button>
       </div>
+      ${whatToDo}
       <div class="plan-grid">
         <section class="panel">
           <p class="step-label">Step 1 — ${this.simple ? "Is it worth watching?" : "Quality gate"}</p>
@@ -844,6 +887,44 @@ class App {
       </div>`;
   }
 
+  private renderWhatToDo(candidate: Candidate, ticks: Tick[], suggestedStop: number) {
+    const verdict = this.overallVerdict(candidate, ticks);
+    const moment = this.momentVerdict(candidate);
+    const reasons = ticks.filter((tick) => tick.state === "pass").map((tick) => tick.label.toLowerCase());
+    const why = reasons.length
+      ? `It ticks ${verdict.passes} of ${ticks.length} quality boxes: ${reasons.join(", ")}.`
+      : "It doesn't tick any of the quality boxes right now.";
+    const target = candidate.price + (candidate.price - suggestedStop) * 2;
+    let action: string;
+    if (verdict.cls === "skip" || verdict.cls === "mid") {
+      action = this.simple
+        ? "This one is missing things that usually matter, so the safest move is to skip it and look at a stronger card."
+        : "Below the quality bar — skip unless the missing pillars resolve.";
+    } else if (moment === "entry") {
+      action = this.simple
+        ? `The moment looks right. In the simulator: buy near ${this.money(candidate.price)}, set your get-out at ${this.money(suggestedStop)}, and aim to sell around ${this.money(target)} — or get out early if it drops below your get-out price or a nasty rejection appears at the top.`
+        : `Entry signal active. Entry ≈ ${this.money(candidate.price)}, stop ${this.money(suggestedStop)}, 2R target ≈ ${this.money(target)}.`;
+    } else if (moment === "wait") {
+      action = this.simple
+        ? "Strong candidate, wrong moment. Don't buy yet — watch it, and only act when it stops falling and starts making new highs again (the check below will turn green)."
+        : "Quality passes; pattern incomplete. Wait for the first candle to break the prior high.";
+    } else if (moment === "avoid") {
+      action = this.simple
+        ? "It was strong earlier, but the healthy pattern has broken — it gave back too much or slipped below its average. Leave it unless a fresh rise starts."
+        : "Pattern failed (deep retrace or below VWAP/EMA). Stand aside unless a new leg forms.";
+    } else {
+      action = this.simple
+        ? "Still reading the chart to judge the moment — the verdict will appear in Step 2 below."
+        : "Moment check pending — see Step 2.";
+    }
+    return `<section class="panel what-to-do verdict-${verdict.cls}">
+      <p class="step-label">${this.simple ? "What to do right now" : "Verdict"}</p>
+      <div class="verdict-chip ${verdict.cls}">${this.escape(verdict.label)}</div>
+      <p class="wtd-why">${this.escape(why)}</p>
+      <p class="wtd-action">${this.escape(action)}</p>
+    </section>`;
+  }
+
   private renderMoment(pullback: PullbackResult | undefined, precision: "full" | "price-only") {
     if (!pullback) return `<div class="moment-verdict unknown">${this.simple ? "Reading the chart…" : "Loading candles…"}</div>`;
     if (!pullback.ready) {
@@ -863,7 +944,7 @@ class App {
           : this.simple ? "It's taking a breather. Wait for it to start climbing again before acting." : "Pullback in progress — wait for the first candle to break the prior high.";
     const priceOnly = precision === "price-only";
     const checks = [
-      { label: this.simple ? "Kept most of its rise" : "Retracement ≤ 50%", pass: pullback.retracementPercent <= 50, detail: `${pullback.retracementPercent.toFixed(0)}%` },
+      { label: this.simple ? "Kept most of its rise" : "Retracement ≤ 50%", pass: pullback.retracementPercent <= 50, detail: pullback.retracementPercent > 100 ? (this.simple ? "gave it all back" : ">100%") : `${this.simple ? `gave back ${pullback.retracementPercent.toFixed(0)}%` : `${pullback.retracementPercent.toFixed(0)}%`}` },
       ...priceOnly ? [] : [
         { label: this.simple ? "Buyers busier than sellers" : "Green volume ≥ red volume", pass: pullback.greenVolumeDominant, detail: "" },
         { label: this.simple ? "Above its average price today" : "Above VWAP", pass: pullback.aboveVwap, detail: this.money(pullback.vwap) }

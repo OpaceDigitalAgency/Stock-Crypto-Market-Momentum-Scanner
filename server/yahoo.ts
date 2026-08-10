@@ -31,6 +31,8 @@ export interface StockQuote {
   delayMinutes: number;
   sourceTime: number;
   quoteSource: string;
+  sector?: string;
+  industry?: string;
 }
 
 export interface StocksPayload {

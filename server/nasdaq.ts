@@ -73,6 +73,40 @@ export async function fetchNasdaqStocks(): Promise<StocksPayload> {
   return { quotes: quotes.slice(0, 150), fetchedAt: now, screens: ["nasdaq-screener"], source: "nasdaq" };
 }
 
+export interface NasdaqSummary {
+  averageVolume: number | null;
+  sector?: string;
+  industry?: string;
+}
+
+const summaryCache = new Map<string, { value: NasdaqSummary; at: number }>();
+const SUMMARY_CACHE_MS = 60 * 60_000;
+
+/**
+ * Per-symbol context from Nasdaq's quote summary: recent average volume
+ * (restores the relative-volume pillar) plus sector and industry.
+ */
+export async function fetchNasdaqSummary(symbol: string): Promise<NasdaqSummary> {
+  const clean = symbol.trim().toUpperCase();
+  if (!/^[A-Z0-9.-]{1,12}$/.test(clean)) throw new Error("Invalid symbol");
+  const cached = summaryCache.get(clean);
+  if (cached && Date.now() - cached.at < SUMMARY_CACHE_MS) return cached.value;
+  const response = await fetch(`https://api.nasdaq.com/api/quote/${encodeURIComponent(clean)}/summary?assetclass=stocks`, {
+    headers: NASDAQ_HEADERS,
+    signal: AbortSignal.timeout(8_000)
+  });
+  if (!response.ok) throw new Error(`Nasdaq summary responded ${response.status}`);
+  const payload = await response.json() as { data?: { summaryData?: { AverageVolume?: { value?: string }; Sector?: { value?: string }; Industry?: { value?: string } } } };
+  const summary = payload.data?.summaryData;
+  const value: NasdaqSummary = {
+    averageVolume: parseNumber(summary?.AverageVolume?.value),
+    sector: summary?.Sector?.value || undefined,
+    industry: summary?.Industry?.value || undefined
+  };
+  summaryCache.set(clean, { value, at: Date.now() });
+  return value;
+}
+
 /**
  * Nasdaq's intraday chart provides price points without OHLC or volume, so
  * candles are synthesised (open = previous point) and marked "price-only".
