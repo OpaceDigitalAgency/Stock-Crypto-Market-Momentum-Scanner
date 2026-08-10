@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import { createCatalystCache, runCatalystLookup } from "./server/catalysts-core.ts";
-import { fetchStockCandles, fetchTopStocks } from "./server/yahoo.ts";
+import { fetchStocksAnySource } from "./server/stocks-source.ts";
+import { fetchStockCandles } from "./server/yahoo.ts";
 
 // Serves the same /api routes locally that Netlify Functions serve in production,
 // so `npm run dev` shows live stock data without any extra tooling.
@@ -21,7 +22,7 @@ function marketDataDev(): Plugin {
           void (async () => {
             try {
               if (!stocksCache || Date.now() - stocksCache.at > 45_000) {
-                stocksCache = { payload: await fetchTopStocks(), at: Date.now() };
+                stocksCache = { payload: await fetchStocksAnySource(), at: Date.now() };
               }
               respond(200, stocksCache.payload);
             } catch (error) {

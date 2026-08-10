@@ -1,4 +1,4 @@
-import { fetchTopStocks } from "../../server/yahoo";
+import { fetchStocksAnySource } from "../../server/stocks-source";
 
 let cache: { payload: unknown; at: number } | null = null;
 const CACHE_MS = 45_000;
@@ -6,7 +6,7 @@ const CACHE_MS = 45_000;
 export default async function handler(): Promise<Response> {
   try {
     if (!cache || Date.now() - cache.at > CACHE_MS) {
-      cache = { payload: await fetchTopStocks(), at: Date.now() };
+      cache = { payload: await fetchStocksAnySource(), at: Date.now() };
     }
   } catch (error) {
     if (!cache) {

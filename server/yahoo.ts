@@ -37,7 +37,7 @@ export interface StocksPayload {
   quotes: StockQuote[];
   fetchedAt: number;
   screens: string[];
-  source: "yahoo-finance";
+  source: "yahoo-finance" | "nasdaq";
 }
 
 export interface CandlePayload {

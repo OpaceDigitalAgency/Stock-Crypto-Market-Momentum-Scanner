@@ -1,6 +1,15 @@
 import { createMemoryCatalystCache, lookupOfficialCatalysts, type CatalystSourceCache } from "../src/catalyst-service";
 import type { CatalystReport } from "../src/catalyst-types";
+import { fetchNasdaqNews } from "./nasdaq";
 import { fetchSymbolNews } from "./yahoo";
+
+async function fetchNewsAnySource(symbol: string) {
+  try {
+    return await fetchSymbolNews(symbol);
+  } catch {
+    return await fetchNasdaqNews(symbol);
+  }
+}
 
 export interface CatalystHandlerOptions {
   secUserAgent?: string;
@@ -25,7 +34,7 @@ export async function runCatalystLookup(body: unknown, options: CatalystHandlerO
   await Promise.all(reports.map(async (report) => {
     if (report.state === "confirmed") return;
     try {
-      const news = await fetchSymbolNews(report.symbol);
+      const news = await fetchNewsAnySource(report.symbol);
       if (news.count > 0) {
         report.news = { ...news, source: "yahoo-news", confidence: "reported" };
       }
