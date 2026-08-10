@@ -30,7 +30,9 @@ export interface NewsMentions {
   topUrl?: string;
   publisher?: string;
   publishedAt?: string;
-  source: "yahoo-news";
+  /** Reason category derived from the headline, e.g. "Earnings news". */
+  kind?: string;
+  source: "google-news" | "yahoo-news" | "nasdaq-news";
   confidence: "reported";
 }
 

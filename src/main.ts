@@ -7,10 +7,11 @@ import { BINANCE_PUBLIC_REST_ENDPOINT, buildBinanceKlinesUrl, buildCryptoMarketS
 import { calculatePlan, defaultFilters, matchesFilters, scoreCandidate } from "./engine";
 import { fetchCandles, mapStockQuote, StocksFeed, type StocksStatus } from "./stocks-feed";
 import { JournalStore } from "./storage";
+import { renderDayChart } from "./chart";
 import { analysePullback, type Candle, type PullbackResult } from "./technical";
 import type { AssetClass, Candidate, Filters, JournalEntry } from "./types";
 
-type View = "discover" | "plan" | "journal";
+type View = "discover" | "plan" | "journal" | "how";
 type Mode = "simple" | "advanced";
 
 interface Prefs {
@@ -124,7 +125,9 @@ class App {
   private catalystReports = new Map<string, CatalystReport>();
   private catalystsRequested = new Set<string>();
 
-  private pullbacks = new Map<string, { result: PullbackResult; at: number; precision: "full" | "price-only" }>();
+  private pullbacks = new Map<string, { result: PullbackResult; at: number; precision: "full" | "price-only"; candles: Candle[] }>();
+  private cryptoNews = new Map<string, { news: { count: number; url?: string; title?: string; publisher?: string; kind?: string } | null; at: number }>();
+  private cryptoNewsPending = new Set<string>();
   private pullbackPending = new Set<string>();
 
   private pendingDeleteId?: string;
@@ -201,7 +204,7 @@ class App {
 
   private catalystFields(report: CatalystReport) {
     const news = report.news && report.news.count > 0
-      ? { count: report.news.count, url: report.news.topUrl, title: report.news.topTitle, publisher: report.news.publisher }
+      ? { count: report.news.count, url: report.news.topUrl, title: report.news.topTitle, publisher: report.news.publisher, kind: report.news.kind }
       : undefined;
     const catalyst = report.state === "confirmed" ? "confirmed" as const
       : news ? "unverified" as const
@@ -222,6 +225,7 @@ class App {
         this.cryptoCandidates = [...incoming, ...retained];
         this.maybeChime(this.cryptoCandidates, "crypto");
         void this.enrichCryptoDetails(candidates);
+        void this.enrichCryptoNews();
         if (this.assetClass === "crypto") this.refreshDiscoverData();
       },
       (status) => {
@@ -273,6 +277,34 @@ class App {
     });
   }
 
+  private async enrichCryptoNews() {
+    const targets = this.rankedCandidates("crypto").slice(0, 8).filter((candidate) => {
+      const cached = this.cryptoNews.get(candidate.symbol);
+      return !this.cryptoNewsPending.has(candidate.symbol) && (!cached || Date.now() - cached.at > 10 * 60_000);
+    });
+    await Promise.all(targets.map(async (candidate) => {
+      this.cryptoNewsPending.add(candidate.symbol);
+      try {
+        const base = this.displaySymbol(candidate);
+        const response = await fetch(`/api/news?q=${encodeURIComponent(`${base} crypto`)}`);
+        if (!response.ok) throw new Error("News source unavailable");
+        const payload = await response.json() as { count?: number; topTitle?: string; topUrl?: string; publisher?: string; kind?: string };
+        this.cryptoNews.set(candidate.symbol, {
+          news: payload.count && payload.count > 0 ? { count: payload.count, title: payload.topTitle, url: payload.topUrl, publisher: payload.publisher, kind: payload.kind } : null,
+          at: Date.now()
+        });
+      } catch {
+        this.cryptoNews.set(candidate.symbol, { news: null, at: Date.now() });
+      } finally {
+        this.cryptoNewsPending.delete(candidate.symbol);
+      }
+    }));
+    if (targets.length) {
+      this.cryptoCandidates = this.applyCryptoDetails(this.cryptoCandidates);
+      if (this.assetClass === "crypto") this.refreshDiscoverData();
+    }
+  }
+
   private applyCryptoDetails(candidates: Candidate[]) {
     return candidates.map((candidate) => {
       const detail = this.cryptoDetails.get(candidate.symbol);
@@ -285,7 +317,19 @@ class App {
         : this.cryptoDetailFailures.has(candidate.symbol) ? "unavailable" as const
         : this.cryptoDetailPending.has(candidate.symbol) ? "loading" as const
         : "queued" as const;
-      const enriched = { ...candidate, momentum5m, momentum1h, depthQuote, spreadPercent, relativeVolume, detailState };
+      const newsRecord = this.cryptoNews.get(candidate.symbol);
+      const catalystNews = newsRecord?.news ?? undefined;
+      const enriched = {
+        ...candidate,
+        momentum5m,
+        momentum1h,
+        depthQuote,
+        spreadPercent,
+        relativeVolume,
+        detailState,
+        catalystNews,
+        catalyst: catalystNews ? "unverified" as const : candidate.catalyst
+      };
       return { ...enriched, score: scoreCandidate(enriched, this.filters.crypto) };
     });
   }
@@ -348,9 +392,9 @@ class App {
           time: raw.closeTime, open: raw.open, high: raw.high, low: raw.low, close: raw.close, volume: raw.baseVolume
         }));
       }
-      this.pullbacks.set(candidate.symbol, { result: analysePullback(candles), at: Date.now(), precision });
+      this.pullbacks.set(candidate.symbol, { result: analysePullback(candles), at: Date.now(), precision, candles });
     } catch {
-      this.pullbacks.set(candidate.symbol, { result: { ready: false, reason: "source-unavailable" }, at: Date.now(), precision: "full" });
+      this.pullbacks.set(candidate.symbol, { result: { ready: false, reason: "source-unavailable" }, at: Date.now(), precision: "full", candles: [] });
     } finally {
       this.pullbackPending.delete(candidate.symbol);
       if (this.view === "plan" && this.selected?.symbol === candidate.symbol) this.render();
@@ -417,13 +461,33 @@ class App {
 
   private catalystTick(candidate: Candidate, catalystChecked: boolean): Tick {
     const label = this.simple ? "Clear reason for the move" : "Catalyst";
-    if (candidate.catalystState === "confirmed") return { label, detail: this.simple ? "Official filing or halt found" : "Official evidence confirmed", state: "pass" };
-    if (candidate.catalystNews) {
-      const headline = candidate.catalystNews.title ? `“${candidate.catalystNews.title}”` : `${candidate.catalystNews.count} recent stories`;
-      return { label, detail: this.simple ? `In the news — ${headline}` : `Reported: ${headline}${candidate.catalystNews.publisher ? ` (${candidate.catalystNews.publisher})` : ""}`, state: "pass" };
+    if (candidate.catalystState === "confirmed") {
+      const evidence = candidate.catalystEvidence?.[0];
+      const what = evidence?.title ? this.truncate(evidence.title, 72) : "official filing or trading halt";
+      return { label, detail: `Official: ${what}`, state: "pass" };
+    }
+    const news = candidate.catalystNews;
+    if (news) {
+      if (news.kind === "Market roundup") {
+        return { label, detail: this.simple ? "No headline names it directly — only broad market coverage found" : "No subject-specific headline; broad coverage only", state: "unknown" };
+      }
+      const headline = news.title ? `“${this.truncate(news.title, 84)}”` : `${news.count} recent stories`;
+      const prefix = news.kind ?? "In the news";
+      return { label, detail: `${prefix} — ${headline}`, state: "pass" };
+    }
+    if (candidate.assetClass === "crypto") {
+      const cached = this.cryptoNews.get(candidate.symbol);
+      if (cached && cached.news === null) {
+        return { label, detail: this.simple ? "No clear news found — crypto spikes often start on social media before the press" : "No recent headlines found", state: "unknown" };
+      }
+      return { label, detail: "Checking the news…", state: "unknown" };
     }
     if (!catalystChecked) return { label, detail: "Not checked yet", state: "unknown" };
-    return { label, detail: "No official news found", state: "fail" };
+    return { label, detail: "No official news or headlines found", state: "fail" };
+  }
+
+  private truncate(value: string, length: number) {
+    return value.length > length ? `${value.slice(0, length - 1).trimEnd()}…` : value;
   }
 
   private cryptoTicks(candidate: Candidate, filters: Filters): Tick[] {
@@ -436,7 +500,8 @@ class App {
       { label: this.simple ? "Moving right now" : "Positive 5m/1h momentum", detail: momentumKnown ? `${this.percent(candidate.momentum5m ?? 0)} in 5 min · ${this.percent(candidate.momentum1h ?? 0)} in 1 hour` : "Still measuring", state: !momentumKnown ? "unknown" : movingNow ? "pass" : "fail" },
       { label: this.simple ? "Busier than usual" : "5m activity above recent norm", detail: `${candidate.relativeVolume.toFixed(1)}× its recent activity`, state: busy ? "pass" : "fail" },
       { label: this.simple ? "Easy to buy and sell" : "Spread and volume within limits", detail: `${candidate.spreadPercent.toFixed(2)}% spread`, state: tradeable ? "pass" : "fail" },
-      { label: this.simple ? "Price checked on two venues" : "Coinbase cross-check", detail: candidate.crossVenue ? "Binance and Coinbase agree" : "Binance only", state: candidate.crossVenue ? "pass" : "unknown" }
+      { label: this.simple ? "Price checked on two venues" : "Coinbase cross-check", detail: candidate.crossVenue ? "Binance and Coinbase agree" : "Binance only", state: candidate.crossVenue ? "pass" : "unknown" },
+      this.catalystTick(candidate, true)
     ];
   }
 
@@ -447,7 +512,7 @@ class App {
       ${this.renderTopbar()}
       ${this.renderSessionStrip()}
       <nav class="view-nav" aria-label="Workspace">
-        ${(["discover", "plan", "journal"] as View[]).map((view) => `<button data-view="${view}" class="${this.view === view ? "active" : ""}" aria-current="${this.view === view ? "page" : "false"}">${this.viewLabel(view)}</button>`).join("")}
+        ${(["discover", "plan", "journal", "how"] as View[]).map((view) => `<button data-view="${view}" class="${this.view === view ? "active" : ""}" aria-current="${this.view === view ? "page" : "false"}">${this.viewLabel(view)}</button>`).join("")}
       </nav>
       <main>${this.renderView()}</main>
       <footer><span>Practice only — nothing here is financial advice and no real orders are ever placed.</span><span>Your journal stays in this browser.</span></footer>
@@ -458,7 +523,8 @@ class App {
   private viewLabel(view: View) {
     if (view === "discover") return this.simple ? "What's moving" : "Discover";
     if (view === "plan") return this.simple ? "Check & plan" : "Plan";
-    return this.simple ? "My results" : "Journal";
+    if (view === "journal") return this.simple ? "My results" : "Journal";
+    return "How it works";
   }
 
   private renderTopbar() {
@@ -512,7 +578,56 @@ class App {
   private renderView() {
     if (this.view === "plan") return this.renderPlan();
     if (this.view === "journal") return this.renderJournal();
+    if (this.view === "how") return this.renderHow();
     return this.renderDiscover();
+  }
+
+  private renderHow() {
+    return `
+      <div class="discover-head">
+        <div>
+          <p class="eyebrow">The mechanics</p>
+          <h1>How this tool works</h1>
+          <p class="lede">It finds fast-rising stocks and crypto, checks whether the move looks genuine, then helps you limit your risk. Here is each part in plain English.</p>
+        </div>
+      </div>
+      <div class="how-grid">
+        <section class="panel how-card">
+          <span class="how-number">1</span>
+          <h2>Spot the movers</h2>
+          <p>It spots unusual activity by comparing today's trading with what is normally seen, and finds fast risers by measuring how quickly the price has increased.</p>
+          <details>
+            <summary>What counts as "normal"?</summary>
+            <p>For shares, today's trading volume is compared with the average of the last three months — five times busier than usual is the classic momentum signal.</p>
+            <p>For crypto, each completed five-minute period is compared with the previous twelve five-minute periods, so "normal" continually updates using the last hour.</p>
+            <p>Speed of rise is measured over three windows for crypto (5 minutes, 1 hour, 24 hours) and as today's percentage gain for shares.</p>
+          </details>
+        </section>
+        <section class="panel how-card">
+          <span class="how-number">2</span>
+          <h2>Check the move is genuine</h2>
+          <p>It checks legitimacy by looking at trading volume, liquidity and genuine company or project news.</p>
+          <details>
+            <summary>The five checks behind the ticks</summary>
+            <p>A strong candidate is up a lot, trading much busier than normal, priced where big percentage moves actually happen, short of supply (few shares in issue), and moving for a reason you can read — an official filing, a trading halt, or a news headline. Each card shows exactly which of these pass.</p>
+            <p>Then the chart shape is read: a genuine move usually rises, takes a small breather without giving back more than half its rise, and starts climbing again. Fakes tend to collapse straight back down.</p>
+          </details>
+        </section>
+        <section class="panel how-card">
+          <span class="how-number">3</span>
+          <h2>Limit the risk</h2>
+          <p>It limits risk by calculating how much to buy and when to exit if the trade falls.</p>
+          <details>
+            <summary>The rules it applies</summary>
+            <p>You choose the most you are willing to lose. The tool sets a get-out price at the low of the breather, sizes the position so a wrong trade costs only that amount, and aims for a win worth at least twice the risk — so being right half the time is enough to come out ahead.</p>
+            <p>It also coaches the day itself: stop when you hit your daily limit, stop when you hand back half of a good day, and be wary after the best morning hours are over.</p>
+          </details>
+        </section>
+      </div>
+      <section class="panel how-foot">
+        <p><strong>Where the data comes from:</strong> live US share prices via public market screens, live crypto prices directly from Binance with a Coinbase cross-check, and reasons from official SEC filings, Nasdaq halt notices and news headlines.</p>
+        <p><strong>What this is not:</strong> a prediction machine or financial advice. It is a practice tool — every trade here is simulated, nothing is ever bought or sold, and the aim is to learn a repeatable process before any real money is involved.</p>
+      </section>`;
   }
 
   /* ---------- Discover ---------- */
@@ -704,6 +819,15 @@ class App {
         <section class="panel">
           <p class="step-label">Step 2 — ${this.simple ? "Is this a good moment?" : "Pullback check"}</p>
           ${this.renderMoment(pullback, pullbackRecord?.precision ?? "full")}
+        </section>
+        <section class="panel" style="grid-column:1/-1">
+          <p class="step-label">${this.simple ? "The day so far" : "Intraday chart"}</p>
+          ${pullbackRecord && pullbackRecord.candles.length
+            ? `${renderDayChart(pullbackRecord.candles, { precision: pullbackRecord.precision, showGuides: true, markStop: suggestedStop })}
+               ${pullbackRecord.precision === "full"
+                 ? `<div class="chart-legend"><span><i class="swatch vwap"></i>${this.simple ? "Average price today" : "VWAP"}</span><span><i class="swatch ema"></i>${this.simple ? "Recent trend" : "9 EMA"}</span><span><i class="swatch stop"></i>${this.simple ? "Suggested get-out" : "Suggested stop"}</span></div>`
+                 : `<div class="chart-legend"><span>${this.simple ? "Price line for the day — finer candle detail wasn't available for this one." : "Price-only source; OHLC candles unavailable."}</span></div>`}`
+            : `<div class="chart-empty">${this.simple ? "Drawing the chart…" : "Loading candles…"}</div>`}
         </section>
         <section class="panel" style="grid-column:1/-1">
           <p class="step-label">Step 3 — ${this.simple ? "Plan your practice trade" : "Position size"}</p>

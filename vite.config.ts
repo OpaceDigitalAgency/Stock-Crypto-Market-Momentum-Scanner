@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import { createCatalystCache, runCatalystLookup } from "./server/catalysts-core.ts";
+import { fetchGoogleNews } from "./server/google-news.ts";
 import { fetchCandlesAnySource, fetchStocksAnySource } from "./server/stocks-source.ts";
 
 // Serves the same /api routes locally that Netlify Functions serve in production,
@@ -27,6 +28,16 @@ function marketDataDev(): Plugin {
             } catch (error) {
               if (stocksCache) respond(200, stocksCache.payload);
               else respond(502, { error: error instanceof Error ? error.message : "Stock source unavailable" });
+            }
+          })();
+          return;
+        }
+        if (url.pathname === "/api/news") {
+          void (async () => {
+            try {
+              respond(200, await fetchGoogleNews(url.searchParams.get("q") ?? ""));
+            } catch (error) {
+              respond(502, { error: error instanceof Error ? error.message : "News source unavailable" });
             }
           })();
           return;

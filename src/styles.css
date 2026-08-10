@@ -614,6 +614,116 @@ td small { display: block; color: var(--faint); font-size: 11.5px; margin-top: 2
 
 .form-error { color: var(--loss); margin: 0; }
 
+/* ---------- Day chart ---------- */
+
+.day-chart {
+  width: 100%;
+  height: clamp(180px, 30vw, 280px);
+  display: block;
+  border-radius: var(--radius-small);
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.chart-grid { stroke: var(--line); stroke-width: 1; }
+.chart-axis { fill: var(--faint); font-family: var(--font-mono); font-size: 11px; }
+.chart-axis.stop { fill: var(--amber); }
+
+.candle-body.up { fill: var(--gain); }
+.candle-body.down { fill: var(--loss); }
+.candle-wick.up { stroke: var(--gain); stroke-width: 1; }
+.candle-wick.down { stroke: var(--loss); stroke-width: 1; }
+
+.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.chart-line.up { stroke: var(--gain); }
+.chart-line.down { stroke: var(--loss); }
+
+.chart-vwap { fill: none; stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.9; }
+.chart-ema { fill: none; stroke: #6EA8FF; stroke-width: 1.5; opacity: 0.9; }
+.chart-stop { stroke: var(--amber); stroke-width: 1; stroke-dasharray: 2 4; }
+.chart-last { fill: var(--text); }
+
+.chart-legend {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.chart-legend .swatch {
+  display: inline-block;
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.chart-legend .swatch.vwap { background: var(--amber); }
+.chart-legend .swatch.ema { background: #6EA8FF; }
+.chart-legend .swatch.stop { background: var(--amber); opacity: 0.5; }
+
+.chart-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-small);
+  padding: 40px;
+  text-align: center;
+  color: var(--faint);
+}
+
+/* ---------- How it works ---------- */
+
+.how-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.how-card { position: relative; }
+
+.how-card h2 { margin: 0 0 10px; }
+
+.how-card > p { color: var(--muted); margin: 0 0 12px; }
+
+.how-number {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--amber), var(--amber-deep));
+  color: #14100A;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+.how-card details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.how-card summary {
+  cursor: pointer;
+  color: var(--amber);
+  font-weight: 600;
+  font-size: 13.5px;
+  list-style: none;
+}
+
+.how-card summary::before { content: "+ "; }
+.how-card details[open] summary::before { content: "− "; }
+
+.how-card details p { color: var(--muted); font-size: 14px; margin: 10px 0 0; }
+
+.how-foot p { color: var(--muted); margin: 0 0 10px; font-size: 14px; }
+.how-foot p:last-child { margin-bottom: 0; }
+.how-foot strong { color: var(--text); }
+
 /* ---------- Journal ---------- */
 
 .coach-banner {

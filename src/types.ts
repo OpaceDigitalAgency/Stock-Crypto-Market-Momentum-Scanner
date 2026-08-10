@@ -30,7 +30,7 @@ export interface Candidate {
   missing?: string[];
   catalystState?: "checking" | "confirmed" | "no-evidence" | "source-unavailable";
   catalystEvidence?: { title: string; url: string; publishedAt: string }[];
-  catalystNews?: { count: number; url?: string; title?: string; publisher?: string };
+  catalystNews?: { count: number; url?: string; title?: string; publisher?: string; kind?: string };
   technical?: {
     retracementPercent: number;
     greenVolumeDominant: boolean;
